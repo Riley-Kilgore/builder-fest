@@ -13,6 +13,9 @@ const base = process.env.VITE_BASE ?? (repoName ? `/${repoName}/` : "/");
 export default defineConfig({
   base,
   plugins: [wasm(), react()],
+  build: {
+    target: "esnext",
+  },
   define: {
     global: "globalThis",
     "process.env": "{}",
