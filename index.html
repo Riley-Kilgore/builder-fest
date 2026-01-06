@@ -16,6 +16,15 @@
   </head>
   <body>
     <div id="root"></div>
+    <script type="module">
+      import { Buffer } from "buffer";
+      if (!globalThis.Buffer) {
+        globalThis.Buffer = Buffer;
+      }
+      if (!globalThis.global) {
+        globalThis.global = globalThis;
+      }
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
