@@ -3,6 +3,13 @@ import { MeshTxBuilder } from "@meshsdk/transaction";
 import { BlockfrostProvider } from "@meshsdk/provider";
 import { addressToBech32, deserializeAddress } from "@meshsdk/core-cst";
 import {
+  csl,
+  deserializeTx as deserializeTxCsl,
+  deserializeTxBody,
+  deserializeTxWitnessSet,
+  fromBytes,
+} from "@meshsdk/core-csl";
+import {
   SLOT_CONFIG_NETWORK,
   stringToHex,
   unixTimeToEnclosingSlot,
@@ -17,6 +24,7 @@ type Cip30WalletApi = {
   getChangeAddress: () => Promise<string>;
   getCollateral?: () => Promise<string[] | undefined>;
   signTx: (tx: string, partialSign?: boolean) => Promise<string>;
+  submitTx: (tx: string) => Promise<string>;
 };
 
 type Cip30WalletHandle = {
@@ -59,7 +67,7 @@ export default function App() {
   const [status, setStatus] = useState("Waiting for wallet connection.");
   const [busy, setBusy] = useState(false);
   const [txCbor, setTxCbor] = useState<string | null>(null);
-  const [signedTx, setSignedTx] = useState<string | null>(null);
+  const [txHash, setTxHash] = useState<string | null>(null);
   const [detectedWalletKeys, setDetectedWalletKeys] = useState<string[]>([]);
 
   const utxoCount = useMemo(() => utxos.length, [utxos.length]);
@@ -145,7 +153,7 @@ export default function App() {
     setBusy(true);
     setStatus("Building a draft transaction...");
     setTxCbor(null);
-    setSignedTx(null);
+    setTxHash(null);
 
     try {
       const rawChangeAddress = address ?? (await walletApi.getChangeAddress());
@@ -328,10 +336,15 @@ export default function App() {
       setStatus("Draft transaction built. Awaiting signature...");
 
       console.info("Requesting wallet signature...");
-      const signed = await walletApi.signTx(unsignedTx, true);
+      const signedWitnesses = await walletApi.signTx(unsignedTx, true);
+      const signed = normalizeSignedTx(unsignedTx, signedWitnesses);
       console.info("Signed tx received");
-      setSignedTx(signed);
-      setStatus("Transaction signed (not submitted).");
+      setStatus("Submitting signed transaction...");
+
+      const submittedHash = await submitToBlockfrost(signed);
+      console.info("Transaction submitted", { txHash: submittedHash });
+      setTxHash(submittedHash);
+      setStatus(`Transaction submitted: ${shorten(submittedHash)}`);
     } catch (error) {
       const errorDetails = describeUnknownError(error);
       console.error("Draft build error", errorDetails);
@@ -348,7 +361,7 @@ export default function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark" />
-          <span>Build Fest</span>
+          <span>Builder Fest 2026</span>
         </div>
         <button
           className="ghost"
@@ -365,11 +378,11 @@ export default function App() {
 
       <main className="center-stage">
         <div className="hero-card">
-          <p className="eyebrow">Transaction Studio</p>
-          <h1>Generate a draft transaction</h1>
+          <p className="eyebrow">Ticket Checkout</p>
+          <h1>Buy tickets for Builder Fest 2026 in Buenos Aires</h1>
           <p className="subhead">
-            We pull your UTxOs automatically. No forms, no manual inputs—just
-            your wallet.
+            Purchase your Builder Fest 2026 pass with your wallet. We build the
+            draft transaction automatically, no forms or manual inputs.
           </p>
 
           <button
@@ -377,7 +390,7 @@ export default function App() {
             onClick={refreshWallet}
             disabled={!hasWallet || busy}
           >
-            {hasWallet ? "Generate Draft Transaction" : "Connect wallet first"}
+            {hasWallet ? "Build Ticket Purchase Draft" : "Connect wallet first"}
           </button>
 
           <div className="details">
@@ -410,8 +423,26 @@ export default function App() {
               <strong>{txCbor ? shorten(txCbor, 14, 10) : "—"}</strong>
             </div>
             <div>
-              <span className="label">Signed tx (cbor)</span>
-              <strong>{signedTx ? shorten(signedTx, 14, 10) : "—"}</strong>
+              <span className="label">Submitted tx hash</span>
+              <div className="hash-row">
+                <code>{txHash ?? "—"}</code>
+                <button
+                  className="ghost ghost-small"
+                  type="button"
+                  onClick={() => {
+                    if (!txHash) return;
+                    void navigator.clipboard
+                      .writeText(txHash)
+                      .then(() => setStatus("Transaction hash copied."))
+                      .catch(() =>
+                        setStatus("Unable to copy transaction hash."),
+                      );
+                  }}
+                  disabled={!txHash}
+                >
+                  Copy
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -668,6 +699,27 @@ const fetchBlockfrostJson = async <T,>(path: string): Promise<T> => {
   return body as T;
 };
 
+const submitToBlockfrost = async (signedTxCbor: string): Promise<string> => {
+  if (!BLOCKFROST_PROJECT_ID) {
+    throw new Error("Missing Blockfrost key.");
+  }
+  const normalized = normalizeHexString(signedTxCbor, "Signed transaction");
+  const response = await fetch(`${BLOCKFROST_BASE_URL}/tx/submit`, {
+    method: "POST",
+    headers: {
+      project_id: BLOCKFROST_PROJECT_ID,
+      "content-type": "application/cbor",
+    },
+    body: hexToBytes(normalized),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    const details = text ? text : response.statusText;
+    throw new Error(`Blockfrost submit failed: ${details}`);
+  }
+  return text.trim();
+};
+
 const parseJsonLoose = (text: string): unknown => {
   if (!text) return null;
   try {
@@ -743,4 +795,86 @@ const formatAda = (lovelace: bigint) => {
   const frac = abs % 1_000_000n;
   const fracStr = frac.toString().padStart(6, "0").replace(/0+$/, "");
   return `${sign}${whole}${fracStr ? `.${fracStr}` : ""} ADA`;
+};
+
+const normalizeSignedTx = (unsignedTx: string, signedResult: string) => {
+  if (signedResult.trim() === "") {
+    throw new Error("Wallet did not return a signature.");
+  }
+  const normalizedSigned = normalizeHexString(
+    signedResult,
+    "Signed transaction",
+  );
+  const normalizedUnsigned = normalizeHexString(
+    unsignedTx,
+    "Unsigned transaction",
+  );
+  if (isFullTransactionCbor(normalizedSigned)) {
+    return normalizedSigned;
+  }
+  return addWitnessesToUnsigned(normalizedUnsigned, normalizedSigned);
+};
+
+const addWitnessesToUnsigned = (unsignedTx: string, witnessesCbor: string) => {
+  const tx = parseUnsignedTransaction(unsignedTx);
+  const incomingWitnessSet = deserializeTxWitnessSet(witnessesCbor);
+  const currentWitnessSet = tx.witness_set();
+  const combinedVkeys = csl.Vkeywitnesses.new();
+  const addVkeys = (vkeys?: csl.Vkeywitnesses) => {
+    if (!vkeys) return;
+    for (let i = 0; i < vkeys.len(); i += 1) {
+      const witness = vkeys.get(i);
+      combinedVkeys.add(witness);
+    }
+  };
+  addVkeys(currentWitnessSet.vkeys());
+  addVkeys(incomingWitnessSet.vkeys());
+
+  if (combinedVkeys.len() === 0) {
+    throw new Error("Wallet returned an empty witness set.");
+  }
+  currentWitnessSet.set_vkeys(combinedVkeys);
+  const mergedTx = csl.Transaction.new(
+    tx.body(),
+    currentWitnessSet,
+    tx.auxiliary_data(),
+  );
+  return fromBytes(mergedTx.to_bytes());
+};
+
+const normalizeHexString = (value: string, label: string) => {
+  const trimmed = value.trim();
+  const withoutPrefix = trimmed.startsWith("0x") || trimmed.startsWith("0X")
+    ? trimmed.slice(2)
+    : trimmed;
+  if (!isHexString(withoutPrefix)) {
+    throw new Error(`${label} is not valid hex.`);
+  }
+  return withoutPrefix;
+};
+
+const parseUnsignedTransaction = (unsignedTx: string) => {
+  try {
+    return deserializeTxCsl(unsignedTx);
+  } catch (error) {
+    try {
+      const txBody = deserializeTxBody(unsignedTx);
+      return csl.Transaction.new(txBody, csl.TransactionWitnessSet.new());
+    } catch (innerError) {
+      throw new Error(
+        `Unable to parse unsigned transaction CBOR. ${
+          innerError instanceof Error ? innerError.message : String(innerError)
+        }`,
+      );
+    }
+  }
+};
+
+const isFullTransactionCbor = (txHex: string) => {
+  try {
+    deserializeTxCsl(txHex);
+    return true;
+  } catch {
+    return false;
+  }
 };

@@ -165,6 +165,24 @@ h1 {
   text-align: left;
 }
 
+.hash-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.hash-row code {
+  display: inline;
+  margin: 0;
+  word-break: break-all;
+}
+
+.ghost.ghost-small {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
 code {
   display: block;
   font-family: "SFMono-Regular", "Menlo", monospace;
