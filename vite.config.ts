@@ -7,8 +7,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = dirname(fileURLToPath(import.meta.url));
+const repoName = process.env.GITHUB_REPOSITORY?.split("/")[1];
+const base = process.env.VITE_BASE ?? (repoName ? `/${repoName}/` : "/");
 
 export default defineConfig({
+  base,
   plugins: [wasm(), react()],
   define: {
     global: "globalThis",
